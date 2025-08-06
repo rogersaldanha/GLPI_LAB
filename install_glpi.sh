@@ -9,7 +9,7 @@ echo "#########################################################"
 GLPI_VERSION="10.0.15"
 DB_NAME="glpidb"
 DB_USER="glpiuser"
-DB_PASS="sua_senha_forte_aqui"
+DB_PASS="?GHo5zm@jj&9?r#m"
 
 # --- PARSE DOS ARGUMENTOS DE LINHA DE COMANDO ---
 # O 'getopts' é uma forma robusta de processar argumentos no shell.
