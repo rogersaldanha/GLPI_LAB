@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Instalação automatizada do GLPI no Ubuntu 22.04 com Nginx + PHP-FPM + MariaDB
-# Script seguro, reutilizável e com feedback claro
+# Com ajustes de segurança recomendados pela documentação oficial
 
 # ————— CONFIGURAÇÕES —————
 GLPI_DB="glpi"
 GLPI_USER="glpiuser"
 GLPI_PASS="?GHo5zm@jj&9?r#m"
 GLPI_VERSION="10.0.15"
-DOMAIN="glpi.local"
+DOMAIN="54.189.107.254"           # IP ou domínio
 WEB_ROOT="/var/www/glpi"
+GLPI_PUBLIC_DIR="$WEB_ROOT/public"
+GLPI_FILES_DIR="/var/lib/glpi/files"
 LOGFILE="/var/log/install_glpi.log"
 DOWNLOAD_DIR="/tmp"
 KEEP_DOWNLOADS=false
+NGINX_CONF="/etc/nginx/sites-available/glpi"
+PHP_VERSION="8.1"
 
 # ————— CORES PARA MENSAGENS —————
 RED='\033[1;31m'
@@ -53,7 +57,7 @@ trap 'fail "Execução interrompida pelo usuário."; exit 1' INT TERM
 # ————— INÍCIO —————
 
 echo
-info "Iniciando instalação do GLPI. Log em: $LOGFILE"
+info "Iniciando instalação do GLPI com segurança reforçada. Log em: $LOGFILE"
 echo
 
 # Verificar sudo
@@ -61,7 +65,7 @@ if ! sudo -n true 2>/dev/null; then
   warn "Você precisará digitar a senha do sudo quando solicitado."
 fi
 
-# Verificar existência do diretório
+# Verificar existência do diretório principal GLPI
 if [ -d "$WEB_ROOT" ]; then
   warn "Diretório $WEB_ROOT já existe."
   read -p "Deseja abortar para evitar sobrescrever? (s/N): " resp
@@ -77,16 +81,18 @@ sudo apt update -y || fail "Erro no apt update"
 sudo apt upgrade -y || fail "Erro no apt upgrade"
 success "Sistema atualizado"
 
-# Instalar pacotes necessários
+# Instalar pacotes necessários (inclui bz2 e zip)
 info "Instalando Nginx, MariaDB, PHP e extensões..."
-sudo apt install -y nginx mariadb-server mariadb-client php-fpm php-cli php-common php-mysql php-gd php-imap php-ldap php-apcu php-xmlrpc php-curl php-mbstring php-xml php-bcmath php-intl unzip wget || fail "Falha na instalação dos pacotes"
+sudo apt install -y nginx mariadb-server mariadb-client \
+php-fpm php-cli php-common php-mysql php-gd php-imap php-ldap php-apcu php-xmlrpc \
+php-curl php-mbstring php-xml php-bcmath php-intl unzip wget php-bz2 php-zip || fail "Falha na instalação dos pacotes"
 success "Pacotes instalados"
 
 # Ativar e iniciar serviços
 info "Iniciando e habilitando serviços..."
 sudo systemctl enable --now nginx mariadb || fail "Erro ao iniciar nginx ou mariadb"
 
-PHP_FPM_SERVICE="php8.1-fpm"
+PHP_FPM_SERVICE="php${PHP_VERSION}-fpm"
 if sudo systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
   success "$PHP_FPM_SERVICE ativo"
 else
@@ -102,8 +108,8 @@ fi
 # Detectar socket PHP-FPM
 info "Detectando socket PHP-FPM..."
 PHP_SOCKET=""
-if [ -S "/var/run/php/php8.1-fpm.sock" ]; then
-  PHP_SOCKET="/var/run/php/php8.1-fpm.sock"
+if [ -S "/var/run/php/php${PHP_VERSION}-fpm.sock" ]; then
+  PHP_SOCKET="/var/run/php/php${PHP_VERSION}-fpm.sock"
 else
   SOCKS=(/var/run/php/*.sock)
   if [ -S "${SOCKS[0]}" ]; then
@@ -115,6 +121,13 @@ if [ -z "$PHP_SOCKET" ]; then
 else
   success "Socket PHP-FPM detectado: $PHP_SOCKET"
 fi
+
+# Configurar PHP para segurança nas sessões
+info "Configurando PHP para segurança nas sessões..."
+PHP_INI="/etc/php/${PHP_VERSION}/fpm/php.ini"
+sudo sed -i 's/^;session.cookie_httponly =.*/session.cookie_httponly = On/' "$PHP_INI"
+sudo sed -i 's/^;session.cookie_secure =.*/session.cookie_secure = On/' "$PHP_INI" || true # pode falhar se não existir linha comentada
+success "Configurações PHP aplicadas"
 
 # Criar banco e usuário MariaDB
 info "Criando banco e usuário no MariaDB..."
@@ -138,12 +151,33 @@ sudo rm -rf "$WEB_ROOT" || true
 sudo mv glpi "$WEB_ROOT" || fail "Erro ao mover arquivos"
 success "GLPI instalado"
 
-# Ajustar permissões
+# Mover diretório files para fora da raiz web
+info "Movendo diretório de arquivos GLPI para $GLPI_FILES_DIR..."
+sudo mkdir -p "$GLPI_FILES_DIR"
+if [ -d "$WEB_ROOT/files" ]; then
+  sudo mv "$WEB_ROOT/files"/* "$GLPI_FILES_DIR/" || warn "Não foi possível mover todos os arquivos de files"
+  sudo rm -rf "$WEB_ROOT/files"
+fi
+sudo chown -R www-data:www-data "$GLPI_FILES_DIR"
+success "Diretório files movido e permissões ajustadas"
+
+# Ajustar permissões no GLPI
 info "Ajustando permissões para www-data..."
 sudo chown -R www-data:www-data "$WEB_ROOT" || fail "Erro no chown"
 sudo find "$WEB_ROOT" -type d -exec chmod 755 {} \; || fail "Erro chmod dirs"
 sudo find "$WEB_ROOT" -type f -exec chmod 644 {} \; || fail "Erro chmod files"
 success "Permissões ajustadas"
+
+# Criar ou atualizar configuração GLPI para definir GLPI_VAR_DIR
+info "Configurando variável GLPI_VAR_DIR no config/config.php..."
+CONFIG_FILE="$WEB_ROOT/config/config.php"
+if ! grep -q "define('GLPI_VAR_DIR'" "$CONFIG_FILE" 2>/dev/null; then
+  echo "<?php" | sudo tee -a "$CONFIG_FILE" >/dev/null
+  echo "define('GLPI_VAR_DIR', '$GLPI_FILES_DIR');" | sudo tee -a "$CONFIG_FILE" >/dev/null
+else
+  sudo sed -i "s|define('GLPI_VAR_DIR'.*|define('GLPI_VAR_DIR', '$GLPI_FILES_DIR');|" "$CONFIG_FILE"
+fi
+success "Configuração GLPI atualizada"
 
 # Configurar Nginx
 info "Criando configuração do Nginx..."
@@ -152,7 +186,7 @@ server {
     listen 80;
     server_name $DOMAIN;
 
-    root $WEB_ROOT;
+    root $GLPI_PUBLIC_DIR;
     index index.php index.html;
 
     access_log /var/log/nginx/glpi_access.log;
