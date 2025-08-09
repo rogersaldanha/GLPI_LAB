@@ -1,168 +1,222 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Instalação automatizada do GLPI no Ubuntu 22.04 com Nginx + PHP-FPM + MariaDB
+# Script seguro, reutilizável e com feedback claro
 
-echo "#########################################################"
-echo " Script de Instalacao GLPI no Ubuntu 22 com Nginx V1"
-echo "#########################################################"
-
-# --- CONFIGURAÇÃO PADRÃO (VALORES PADRÃO) ---
-# Se não forem passados como parâmetros, o script usará estes valores.
+# ————— CONFIGURAÇÕES —————
+GLPI_DB="glpi"
+GLPI_USER="glpiuser"
+GLPI_PASS="?GHo5zm@jj&9?r#m"
 GLPI_VERSION="10.0.15"
-DB_NAME="glpidb"
-DB_USER="glpiuser"
-DB_PASS="?GHo5zm@jj&9?r#m"
+DOMAIN="glpi.local"
+WEB_ROOT="/var/www/glpi"
+LOGFILE="/var/log/install_glpi.log"
+DOWNLOAD_DIR="/tmp"
+KEEP_DOWNLOADS=false
 
-# --- PARSE DOS ARGUMENTOS DE LINHA DE COMANDO ---
-# O 'getopts' é uma forma robusta de processar argumentos no shell.
-while getopts "v:d:u:p:" opt; do
-    case ${opt} in
-        v) GLPI_VERSION=$OPTARG ;;
-        d) DB_NAME=$OPTARG ;;
-        u) DB_USER=$OPTARG ;;
-        p) DB_PASS=$OPTARG ;;
-        *)
-            echo "Uso: $0 [-v <versao_glpi>] [-d <nome_db>] [-u <usuario_db>] [-p <senha_db>]"
-            exit 1
-            ;;
-    esac
-done
+# ————— CORES PARA MENSAGENS —————
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+NC='\033[0m'
 
-# --- VALIDAÇÕES BÁSICAS ---
-if [ "$DB_PASS" == "sua_senha_forte_aqui" ]; then
-    echo "Aviso: A senha do banco de dados não foi fornecida ou foi mantida no valor padrão."
-    echo "Por favor, defina uma senha forte para produção."
+timestamp() { date "+%Y-%m-%d %H:%M:%S"; }
+
+log() {
+  echo "$(timestamp) $*" | sudo tee -a "$LOGFILE" > /dev/null
+}
+
+info() {
+  echo -e "${BLUE}[INFO]${NC} $*"
+  log "[INFO] $*"
+}
+
+success() {
+  echo -e "${GREEN}[OK]${NC} $*"
+  log "[OK] $*"
+}
+
+warn() {
+  echo -e "${YELLOW}[AVISO]${NC} $*"
+  log "[AVISO] $*"
+}
+
+fail() {
+  echo -e "${RED}[ERRO]${NC} $*"
+  log "[ERRO] $*"
+  echo -e "${RED}Abortando.${NC}"
+  exit 1
+}
+
+trap 'fail "Execução interrompida pelo usuário."; exit 1' INT TERM
+
+# ————— INÍCIO —————
+
+echo
+info "Iniciando instalação do GLPI. Log em: $LOGFILE"
+echo
+
+# Verificar sudo
+if ! sudo -n true 2>/dev/null; then
+  warn "Você precisará digitar a senha do sudo quando solicitado."
 fi
 
-echo "Iniciando a instalação com as seguintes configurações:"
-echo "GLPI Versão: ${GLPI_VERSION}"
-echo "Banco de Dados: ${DB_NAME}"
-echo "Usuário do DB: ${DB_USER}"
-echo "Senha do DB: (oculto)"
+# Verificar existência do diretório
+if [ -d "$WEB_ROOT" ]; then
+  warn "Diretório $WEB_ROOT já existe."
+  read -p "Deseja abortar para evitar sobrescrever? (s/N): " resp
+  case "$resp" in
+    [sS][iI]|[sS]) fail "Abortado. Remova $WEB_ROOT e execute novamente." ;;
+    *) warn "Continuando por sua conta e risco." ;;
+  esac
+fi
 
-# 1. Atualiza a lista de pacotes
-sudo apt update -y
+# Atualizar sistema
+info "Atualizando o sistema..."
+sudo apt update -y || fail "Erro no apt update"
+sudo apt upgrade -y || fail "Erro no apt upgrade"
+success "Sistema atualizado"
 
-# 2. Instala softwares necessários e PHP-FPM com extensões
-sudo apt install -y \
-	nginx mariadb-server \
-	php8.1-fpm php8.1-dom php8.1-fileinfo php8.1-json \
-	php8.1-xml php8.1-curl php8.1-gd php8.1-intl \
-	php8.1-mysqli php8.1-bz2 php8.1-zip php8.1-exif \
-	php8.1-ldap php8.1-opcache php8.1-mbstring \
-	wget
+# Instalar pacotes necessários
+info "Instalando Nginx, MariaDB, PHP e extensões..."
+sudo apt install -y nginx mariadb-server mariadb-client php-fpm php-cli php-common php-mysql php-gd php-imap php-ldap php-apcu php-xmlrpc php-curl php-mbstring php-xml php-bcmath php-intl unzip wget || fail "Falha na instalação dos pacotes"
+success "Pacotes instalados"
 
-# 3. Criar banco de dados e usuário
-sudo mysql -e "CREATE DATABASE ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-sudo mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
-sudo mysql -e "GRANT SELECT ON mysql.time_zone_name TO '${DB_USER}'@'localhost';"
-sudo mysql -e "FLUSH PRIVILEGES;"
+# Ativar e iniciar serviços
+info "Iniciando e habilitando serviços..."
+sudo systemctl enable --now nginx mariadb || fail "Erro ao iniciar nginx ou mariadb"
 
-# 4. Carregar timezones no MySQL
-sudo mysql_tzinfo_to_sql /usr/share/zoneinfo | sudo mysql -u root mysql
+PHP_FPM_SERVICE="php8.1-fpm"
+if sudo systemctl is-active --quiet "$PHP_FPM_SERVICE"; then
+  success "$PHP_FPM_SERVICE ativo"
+else
+  if sudo systemctl is-active --quiet php-fpm; then
+    PHP_FPM_SERVICE="php-fpm"
+    success "php-fpm ativo"
+  else
+    warn "$PHP_FPM_SERVICE não ativo. Tentando iniciar..."
+    sudo systemctl enable --now "$PHP_FPM_SERVICE" || warn "Não foi possível iniciar $PHP_FPM_SERVICE"
+  fi
+fi
 
-# 5. Configurar PHP-FPM
-sudo sed -i 's/^;date.timezone =/date.timezone = America\/Sao_Paulo/' /etc/php/8.1/fpm/php.ini
-sudo sed -i 's/^session.cookie_httponly =/session.cookie_httponly = on/' /etc/php/8.1/fpm/php.ini
+# Detectar socket PHP-FPM
+info "Detectando socket PHP-FPM..."
+PHP_SOCKET=""
+if [ -S "/var/run/php/php8.1-fpm.sock" ]; then
+  PHP_SOCKET="/var/run/php/php8.1-fpm.sock"
+else
+  SOCKS=(/var/run/php/*.sock)
+  if [ -S "${SOCKS[0]}" ]; then
+    PHP_SOCKET="${SOCKS[0]}"
+  fi
+fi
+if [ -z "$PHP_SOCKET" ]; then
+  warn "Socket PHP-FPM não encontrado automaticamente. Ajuste o fastcgi_pass manualmente."
+else
+  success "Socket PHP-FPM detectado: $PHP_SOCKET"
+fi
 
-# 6. Baixar e descompactar o GLPI
-wget -O /tmp/glpi.tgz "https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/glpi-${GLPI_VERSION}.tgz"
+# Criar banco e usuário MariaDB
+info "Criando banco e usuário no MariaDB..."
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`${GLPI_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;" || fail "Falha ao criar banco"
+sudo mysql -e "CREATE USER IF NOT EXISTS '${GLPI_USER}'@'localhost' IDENTIFIED BY '${GLPI_PASS}';" || fail "Falha ao criar usuário"
+sudo mysql -e "GRANT ALL PRIVILEGES ON \`${GLPI_DB}\`.* TO '${GLPI_USER}'@'localhost'; FLUSH PRIVILEGES;" || fail "Falha ao dar privilégios"
+success "Banco e usuário criados"
 
-# 7. Preparar diretórios e descompactar GLPI
-sudo mkdir -p /var/www/glpi
-sudo tar -xzf /tmp/glpi.tgz -C /var/www/glpi --strip-components=1
-sudo rm /tmp/glpi.tgz
+# Baixar GLPI
+info "Baixando GLPI versão ${GLPI_VERSION}..."
+cd "$DOWNLOAD_DIR" || fail "Falha ao acessar $DOWNLOAD_DIR"
+GLPI_TGZ="glpi-${GLPI_VERSION}.tgz"
+GLPI_URL="https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/${GLPI_TGZ}"
+wget -q --show-progress "$GLPI_URL" || fail "Download falhou: $GLPI_URL"
+success "Download concluído"
 
-# 8. Configurar Nginx para o GLPI (Virtual Host)
-cat << "EOF" | sudo tee /etc/nginx/sites-available/glpi.conf
+# Extrair e mover GLPI
+info "Extraindo e movendo GLPI para $WEB_ROOT..."
+tar -xzf "$GLPI_TGZ" || fail "Erro ao descompactar"
+sudo rm -rf "$WEB_ROOT" || true
+sudo mv glpi "$WEB_ROOT" || fail "Erro ao mover arquivos"
+success "GLPI instalado"
+
+# Ajustar permissões
+info "Ajustando permissões para www-data..."
+sudo chown -R www-data:www-data "$WEB_ROOT" || fail "Erro no chown"
+sudo find "$WEB_ROOT" -type d -exec chmod 755 {} \; || fail "Erro chmod dirs"
+sudo find "$WEB_ROOT" -type f -exec chmod 644 {} \; || fail "Erro chmod files"
+success "Permissões ajustadas"
+
+# Configurar Nginx
+info "Criando configuração do Nginx..."
+sudo bash -c "cat > $NGINX_CONF" <<EOF
 server {
     listen 80;
-    server_name _;
-    root /var/www/glpi/public;
-    index index.php;
+    server_name $DOMAIN;
+
+    root $WEB_ROOT;
+    index index.php index.html;
+
+    access_log /var/log/nginx/glpi_access.log;
+    error_log /var/log/nginx/glpi_error.log;
 
     location / {
-        try_files $uri $uri/ /index.php$is_args$args;
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
-        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
-        fastcgi_index index.php;
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$PHP_SOCKET;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     }
 
-    location ~ /(config|files|locales|vendor)/ {
-        deny all;
+    location ~* \.(?:ico|css|js|gif|jpe?g|png|woff2?|eot|ttf|svg)\$ {
+        expires 6M;
+        access_log off;
     }
 }
 EOF
 
-# 9. Ativar o site do Nginx e reiniciar serviços
-sudo ln -sf /etc/nginx/sites-available/glpi.conf /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl restart nginx php8.1-fpm
+# Ativar site e remover default
+info "Ativando site GLPI e desativando site default..."
+sudo ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/glpi || fail "Erro ao ativar site"
+if [ -f /etc/nginx/sites-enabled/default ]; then
+  sudo rm -f /etc/nginx/sites-enabled/default
+  warn "Site default removido para evitar conflito"
+fi
 
-# 10. Configurar permissões iniciais do GLPI
-sudo chown -R www-data:www-data /var/www/glpi
+# Testar e reiniciar Nginx
+info "Testando configuração do Nginx..."
+sudo nginx -t >/dev/null 2>&1 || { sudo tail -n 50 /var/log/nginx/error.log 2>/dev/null; fail "Erro na configuração do Nginx"; }
+success "Configuração do Nginx válida"
 
-# 11. Finalizar setup do glpi pela linha de comando
-sudo php /var/www/glpi/bin/console db:install \
-	--default-language=pt_BR \
-	--db-host=localhost \
-	--db-port=3306 \
-	--db-name=${DB_NAME} \
-	--db-user=${DB_USER} \
-	--db-password=${DB_PASS} \
-	--no-interaction
+info "Reiniciando serviços Nginx e PHP-FPM..."
+sudo systemctl restart nginx || fail "Falha ao reiniciar Nginx"
+sudo systemctl restart "$PHP_FPM_SERVICE" || warn "Falha ao reiniciar PHP-FPM"
+success "Serviços reiniciados"
 
-# 12. Ajustes de Segurança Pós-instalação
-sudo mkdir -p /var/lib/glpi
-sudo mkdir -p /etc/glpi
-sudo mkdir -p /var/log/glpi
+# Limpeza opcional
+if [ "$KEEP_DOWNLOADS" = false ]; then
+  info "Removendo arquivos de download..."
+  rm -f "$DOWNLOAD_DIR/$GLPI_TGZ" || warn "Não foi possível remover $GLPI_TGZ"
+fi
 
-sudo mv /var/www/glpi/files /var/lib/glpi
-sudo mv /var/www/glpi/config /etc/glpi
-sudo rm -rf /var/www/glpi/install
+# Resumo final
+echo
+success "Instalação concluída com sucesso!"
+echo
+echo "Acesse: http://$DOMAIN (ou http://IP_DO_SERVIDOR)"
+echo "Banco: $GLPI_DB"
+echo "Usuário: $GLPI_USER"
+echo "Senha: $GLPI_PASS"
+echo
+echo "Próximos passos:"
+echo "1) Finalize a instalação pelo navegador."
+echo "2) Remova a pasta de instalação: sudo rm -rf $WEB_ROOT/install"
+echo "3) Execute mysql_secure_installation para melhorar a segurança do banco."
+echo "4) Configure HTTPS com Certbot se usar domínio público."
+echo "5) Considere firewall e Fail2Ban para endurecer o servidor."
+echo
 
-# 12.1. Criar os arquivos de configuração
-cat << "EOF" | sudo tee /var/www/glpi/inc/downstream.php
-<?php
-define('GLPI_CONFIG_DIR', '/etc/glpi/');
-if (file_exists(GLPI_CONFIG_DIR . '/local_define.php')) {
-   require_once GLPI_CONFIG_DIR . '/local_define.php';
-}
-EOF
+log "Instalação finalizada com sucesso."
 
-cat << "EOF" | sudo tee /etc/glpi/local_define.php
-<?php
-define('GLPI_VAR_DIR', '/var/lib/glpi');
-define('GLPI_DOC_DIR', GLPI_VAR_DIR);
-define('GLPI_CRON_DIR', GLPI_VAR_DIR . '/_cron');
-define('GLPI_DUMP_DIR', GLPI_VAR_DIR . '/_dumps');
-define('GLPI_GRAPH_DIR', GLPI_VAR_DIR . '/_graphs');
-define('GLPI_LOCK_DIR', GLPI_VAR_DIR . '/_lock');
-define('GLPI_PICTURE_DIR', GLPI_VAR_DIR . '/_pictures');
-define('GLPI_PLUGIN_DOC_DIR', GLPI_VAR_DIR . '/_plugins');
-define('GLPI_RSS_DIR', GLPI_VAR_DIR . '/_rss');
-define('GLPI_SESSION_DIR', GLPI_VAR_DIR . '/_sessions');
-define('GLPI_TMP_DIR', GLPI_VAR_DIR . '/_tmp');
-define('GLPI_UPLOAD_DIR', GLPI_VAR_DIR . '/_uploads');
-define('GLPI_CACHE_DIR', GLPI_VAR_DIR . '/_cache');
-define('GLPI_LOG_DIR', '/var/log/glpi');
-EOF
-
-# 12.2. Definir as permissões corretas
-sudo chown -R www-data:www-data /etc/glpi
-sudo chown -R www-data:www-data /var/lib/glpi
-sudo chown -R www-data:www-data /var/log/glpi
-sudo find /var/www/glpi/ -type f -exec chmod 644 {} \;
-sudo find /var/www/glpi/ -type d -exec chmod 755 {} \;
-sudo chown root:root /var/www/glpi/inc/downstream.php
-sudo chown -R www-data:www-data /var/www/glpi/marketplace
-sudo chown root:root /var/www/glpi/ -R
-sudo chown -R www-data:www-data /var/www/glpi/public/ -R
-
-echo "########  ###################"
-echo " INSTALACAO FINALIZADA COM SUCESSO."
-echo " Acesse o GLPI via navegador para realizar as configuracoes iniciais."
-echo " Usuario de acesso padrao: glpi@localhost, Senha: ${DB_PASS}"
+exit 0
