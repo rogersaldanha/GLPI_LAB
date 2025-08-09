@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "#########################################################"
-echo " Script de Instalacao GLPI no Ubuntu 22 com Nginx"
+echo " Script de Instalacao GLPI no Ubuntu 22 com Nginx V1"
 echo "#########################################################"
 
 # --- CONFIGURAÇÃO PADRÃO (VALORES PADRÃO) ---
